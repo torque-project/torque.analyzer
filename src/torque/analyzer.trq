@@ -1,0 +1,593 @@
+
+(ns torque.analyzer
+  (:require
+    [torque.analyzer.utils :as u]
+    [torque.analyzer.env   :as env]))
+
+(defmulti -analyze-form (fn [form _] (u/classify form)))
+
+(defmulti -parse (fn [form _] (first form)))
+
+(def ^:dynamic analyze-form
+  -analyze-form)
+
+(def ^:dynamic parse
+  -parse)
+
+(def ^:dynamic macroexpand-1)
+
+(def ^:dynamic create-var)
+
+(def ^:dynamic var?)
+
+(defn analyze [form env]
+  (assoc (analyze-form form env) :top-level true))
+
+(defn empty-env []
+  {:context    :ctx/expr
+   :locals     {}
+   :ns         'user})
+
+(defn analyze-in-env [env]
+  (fn [form]
+    (analyze-form form env)))
+
+(defn analyze-const
+  [form env & opts]
+  (let [type (or (first opts) (u/classify form))]
+    (merge
+      {:op       :const
+       :env      env
+       :type     type
+       :literal? true
+       :val      form
+       :form     form}
+      (when-let [m (and (has-meta? form) (not-empty (meta form)))]
+        ;; metadata on a constant literal will not be evaluated at
+        {:meta     (analyze-const m (u/ctx env :ctx/expr) :map)
+         ;; runtime, this is also true for metadata on quoted
+         ;; collection literals
+         :children [:meta]}))))
+
+(defn analyze-symbol
+  [sym env]
+  (let [mform (macroexpand-1 sym env)]
+    (if (= mform sym)
+      (merge (if-let [local-binding (-> env :locals (get sym))]
+               (let [mutable       (:mutable local-binding)
+                     children      (:children local-binding)]
+                 (merge (dissoc local-binding :init)
+                        {:op          :local
+                         :assignable? (boolean mutable)
+                         :children    (vec (remove #{:init} children))}))
+               (if-let [var (let [v (u/resolve-sym sym env)]
+                              (and (var? v) v))]
+                 (let [m (meta var)]
+                   ;; we cannot statically determine if a Var is in a
+                   ;; thread-local context so checking whether it's dynamic
+                   ;; or not is the most we can do
+                   {:op          :var
+                    :assignable? (u/dynamic? var m)
+                    :var         var
+                    :meta        m})
+                 ;; e.g. js/foo.bar or Long/MAX_VALUE
+                 (if-let [maybe-class (namespace sym)]
+                   (let [maybe-class (symbol maybe-class)]
+                     {:op    :maybe-host-form
+                      :class maybe-class
+                      :field (symbol (name sym))})
+                   ;; e.g. java.lang.Integer or Long
+                   {:op    :maybe-class
+                    :class mform})))
+             {:env  env
+              :form mform})
+      (-> (analyze-form mform env)
+          (update-in [:raw-forms] (fnil conj ()) sym)))))
+
+(defn ^:private throw-call-nil [form env]
+  (throw
+    (ex-info "Can't call nil"
+      (merge {:form form}
+             (u/-source-info form env)))))
+
+(defn analyze-seq
+  [form env]
+  (let [op (first form)]
+    (when (nil? op)
+      (throw-call-nil form env))
+    (let [mform (macroexpand-1 form env)]
+      (if (= form mform)
+        (parse mform env)
+        (let [result (analyze-form mform env)]
+              ;;resolved (u/resolve-sym op env)
+              ;;meta     (vary-meta form assoc ::resolved-op resolved)
+          ;;(update-in [:raw-forms] (fnil conj ()) meta)
+          result)))))
+
+(defn ^:private throw-bad-arity [form env lower upper]
+  (throw
+    (ex-info (str "Wrong number of args to "
+                  (first form)
+                  ", had: "
+                  (dec (count form)))
+             (merge {:form  form
+                     :lower lower
+                     :upper (or upper :unbounded)}
+                    (u/-source-info form env)))))
+
+(defn ^:private check-arity
+  ([form env count]
+   (check-arity form env count count))
+  ([form env lower upper]
+   (let [formc (count form)]
+     (when (or (< formc lower)
+               (and upper (> formc upper)))
+       (throw-bad-arity form env lower upper)))))
+
+(defn parse-invoke [form env]
+  (let [f         (first form)
+        args      (rest form)
+        fenv      (u/ctx env :ctx/expr)
+        fn-expr   (analyze-form f fenv)
+        args-expr (mapv (analyze-in-env fenv) args)
+        m         (meta form)]
+    (merge {:op   :invoke
+            :form form
+            :env  env
+            :fn   fn-expr
+            :args args-expr}
+           (when (seq m)
+             ;; meta on invoke form will not be evaluated
+             {:meta m})
+           {:children [:fn :args]})))
+
+(defn parse-if [form env]
+  (check-arity form env 3 4)
+  (let [test      (second form)
+        then      (nth form 2 nil)
+        else      (nth form 3 nil)
+        test-expr (analyze-form test (u/ctx env :ctx/expr))
+        then-expr (analyze-form then env)
+        else-expr (analyze-form else env)]
+    {:op       :if
+     :form     form
+     :env      env
+     :test     test-expr
+     :then     then-expr
+     :else     else-expr
+     :children [:test :then :else]}))
+
+(defn ^:private parse-block [forms]
+  (loop [statements  []
+         e           (first forms)
+         exprs       (rest forms)]
+    (if (seq exprs)
+      (recur (conj statements e)
+             (first exprs)
+             (next exprs))
+      [statements e])))
+
+(defn parse-do [form env]
+  (let [exprs          (rest form)
+        statements-env (u/ctx env :ctx/statement)
+        block          (parse-block exprs)
+        statements     (mapv
+                         (analyze-in-env statements-env)
+                         (nth block 0))
+        ret            (analyze-form (nth block 1) env)]
+    {:op         :do
+     :env        env
+     :form       form
+     :statements statements
+     :ret        ret
+     :children   [:statements :ret]}))
+
+(defn analyze-body [body env]
+  ;; :body is used by emit-form to remove the artificial 'do
+  (assoc (parse (cons 'do body) env) :body? true))
+
+(defn parse-new [form env]
+  (check-arity form env 2 nil)
+  (let [class    (second form)
+        args     (nnext form)
+        args-env (u/ctx env :ctx/expr)
+        args     (mapv (analyze-in-env args-env) args)]
+    {:op          :new
+     :env         env
+     :form        form
+     :class       (analyze-form class (assoc env :locals {}))
+     :args        args
+     :children    [:class :args]}))
+
+(defn parse-quote [form env]
+  (check-arity form env 2)
+  (let [expr  (second form)
+        const (analyze-const expr env)]
+    {:op       :quote
+     :expr     const
+     :form     form
+     :env      env
+     :literal? true
+     :children [:expr]}))
+
+(defn parse-set! [form env]
+  (check-arity form env 3)
+  (let [target (analyze-form (second form) (u/ctx env :ctx/expr))
+        val    (analyze-form (nth form 2) (u/ctx env :ctx/expr))]
+    {:op       :set!
+     :env      env
+     :form     form
+     :target   target
+     :val      val
+     :children [:target :val]}))
+
+(defn validate-bindings [form env]
+  (let [op       (first form)
+        bindings (second form)]
+    (when-let [error-msg
+               (cond
+                 (not (vector? bindings))
+                 (str op " requires a vector for its bindings, had: "
+                      (type bindings))
+
+                 (not (even? (count bindings)))
+                 (str op " requires an even number of forms in binding"
+                      " vector, had: "
+                      (type bindings)))]
+      (throw
+        (ex-info error-msg
+          (merge {:form     form
+                  :bindings bindings}
+                 (u/-source-info form env)))))))
+
+(defn valid-binding-symbol? [s]
+  (and (symbol? s)
+       (not (namespace s))))
+
+;; FIXME: (not (re-find #"\." (name s)))
+
+(defn ^:private throw-bad-binding-symbol [form env name]
+  (throw
+    (ex-info (str "Bad binding form: " name)
+      (merge {:form form
+              :sym  name}
+             (u/-source-info form env)))))
+
+(defn analyze-let [form env]
+  (validate-bindings form env)
+  (let [op       (first form)
+        bindings (second form)
+        body     (nnext form)
+        context  (:context env)
+        loop-id  (:loop-id env)
+        loop?    (= 'loop* op)]
+    (loop [bindings bindings
+           env      (u/ctx env :ctx/expr)
+           binds    []]
+      (if-let [binding-form (seq bindings)]
+        (let [name (first binding-form)
+              init (second binding-form)]
+          (if (not (valid-binding-symbol? name))
+            (throw-bad-binding-symbol form env name)
+            (let [init-expr (analyze-form init env)
+                  bind-expr {:op       :binding
+                             :env      env
+                             :name     name
+                             :init     init-expr
+                             :form     name
+                             :local    (if loop? :loop :let)
+                             :children [:init]}]
+              (recur (nnext binding-form)
+                     (assoc-in env [:locals name] (u/dissoc-env bind-expr))
+                     (conj binds bind-expr)))))
+        (let [body-env (assoc env :context (if loop? :ctx/return context))
+              body     (analyze-body body
+                         (merge body-env
+                                (when loop?
+                                  {:loop-id     loop-id
+                                   :loop-locals (count binds)})))]
+          {:body     body
+           :bindings binds
+           :children [:bindings :body]})))))
+
+(defn parse-let*
+  [form env]
+  (into
+    {:op   :let
+     :form form
+     :env  env}
+    (analyze-let form env)))
+
+(defn parse-loop*
+  [form env]
+  (let [loop-id (gensym "loop_")
+        env     (assoc env :loop-id loop-id)]
+    (into
+      {:op      :loop
+       :form    form
+       :env     env
+       :loop-id loop-id}
+      (analyze-let form env))))
+
+(defn ^:private throw-loop-error [msg form env]
+  (throw
+    (ex-info msg
+      (merge {;;:exprs exprs
+              :form  form}
+             (u/-source-info form env)))))
+
+(defn ^:private check-context [context form env]
+  (when (not (isa? context :ctx/return))
+    (throw-loop-error
+      "Can only recur from tail position"
+      form env)))
+
+(defn ^:private check-loop-locals [exprs loop-locals form env]
+  (when (not (= (count exprs) loop-locals))
+    (throw-loop-error
+      (str "Mismatched argument count to recur, expected: "
+           loop-locals
+           " args, had: "
+           (count exprs))
+      form env)))
+
+(defn parse-recur
+  [form env]
+  (let [exprs       (rest form)
+        context     (:context env)
+        loop-locals (:loop-locals env)
+        loop-id     (:loop-id env)]
+    (check-context context form env)
+    (check-loop-locals exprs loop-locals form env)
+    (let [exprs (mapv (analyze-in-env (u/ctx env :ctx/expr)) exprs)]
+      {:op       :recur
+       :env      env
+       :form     form
+       :exprs    exprs
+       :loop-id  loop-id
+       :children [:exprs]})))
+
+(defn ^:private throw-not-a-symbol [sym form env]
+  (throw
+    (ex-info (str "First argument to def must be a symbol, had: "
+                 (type sym))
+      (merge {:form form}
+             (u/-source-info form env)))))
+
+(defn ^:private check-symbol [sym form env]
+  (when (not (symbol? sym))
+    (throw-not-a-symbol sym form env)))
+
+(defn ^:private throw-namespace-qualified [sym form env]
+  (throw
+    (ex-info "Cannot def namespace qualified symbol"
+      (merge {:form form
+              :sym sym}
+             (u/-source-info form env)))))
+
+(defn ^:private check-namespace [sym form env]
+  (when (namespace sym)
+    (throw-namespace-qualified sym form env)))
+
+(defn ^:private throw-not-a-doc-string [doc form env]
+  (throw
+      (ex-info (str "Expecting doc string to be of type string type, had: "
+                    (type doc))
+        (merge {:form form}
+               (u/-source-info form env)))))
+
+(defn ^:private check-doc-string [doc form env]
+  (when-not (string? doc)
+    (throw-not-a-doc-string doc form env)))
+
+(defn ^:private check-args-vector [params env])
+
+(defn ^:private check-binding-symbols [params env])
+
+(defn ^:private check-invalid-arg-list [params env])
+
+(defn ^:private check-unexpected-params [params env])
+
+(defn ^:private check-only-one-variadic [variadic env])
+
+(defn ^:private check-only-one-fixed-arity [fixed-arities env])
+
+(defn ^:private check-fixed-arities-against-variadic
+  [variadic? variadic meths-exprs env])
+
+(defn ^:private fn-body-env [param-names params-expr loop-id env]
+  (let [without-envs (map u/dissoc-env params-expr)
+        locals       (zipmap param-names without-envs)
+        with-locals  (update-in env [:locals] merge locals)]
+    (into with-locals
+          {:context     :ctx/return
+           :loop-id     loop-id
+           :loop-locals (count params-expr)})))
+
+(defn analyze-fn-method [form env]
+  (let [params (first form)
+        body   (rest form)
+        locals (:locals env)
+        local  (:local env)]
+    (check-args-vector params env)
+    (check-binding-symbols params env)
+    (let [variadic?    (boolean (some #{'&} params))
+          param-names  (if variadic?
+                         ;; TODO: should use pop and peek here
+                         (conj (last (last params)) (first params))
+                         params)
+          env          (dissoc env :local)
+          arity        (count param-names)
+          params-expr  (mapv (fn [name id]
+                               {:op        :binding
+                                :env       env
+                                :form      name
+                                :name      name
+                                :variadic? (and variadic? (= id (dec arity)))
+                                :arg-id    id
+                                :local     :arg})
+                             param-names (range))
+          fixed-arity  (if variadic?
+                         (dec arity)
+                         arity)
+          loop-id      (gensym "loop_")
+          body-env     (fn-body-env param-names params-expr loop-id env)
+          body         (analyze-body body body-env)]
+      (when variadic?
+        (let [x (drop-while (fn [x] not= x '&) params)]
+          (check-invalid-arg-list x env)
+          (check-unexpected-params x env)))
+      (merge {:op          :fn-method
+              :form        form
+              :loop-id     loop-id
+              :env         env
+              :variadic?   variadic?
+              :params      params-expr
+              :fixed-arity fixed-arity
+              :body        body
+              :children    [:params :body]}
+             (when local
+               {:local (u/dissoc-env local)})))))
+
+(defn parse-fn* [form env]
+  (let [op   (first form)
+        args (rest form)]
+    (let [fndecl        (if (symbol? (first args))
+                          [(first args) (next args)]
+                          [nil (seq args)])
+          name          (first fndecl)
+          meths         (second fndecl)
+          name-expr     {:op    :binding
+                         :env   env
+                         :form  name
+                         :local :fn
+                         :name  name}
+          e             (if name
+                          (assoc (assoc-in env
+                                           [:local name]
+                                           (u/dissoc-env name-expr))
+                                 :local name-expr)
+                          env)
+          once?         (-> op meta :once boolean)
+          menv          (assoc (dissoc e :in-try) :once once?)
+          meths         (if (vector? (first meths))
+                          (list meths)
+                          meths)
+          meths-exprs   (mapv (fn [x] (analyze-fn-method x menv)) meths)
+          variadic      (seq (filter :variadic? meths-exprs))
+          variadic?     (boolean variadic)
+          fixed-arities (seq (map :fixed-arity (remove :variadic? meths-exprs)))
+          max-arity     (when fixed-arities (apply max fixed-arities))]
+      ;; syntax checks
+      (check-only-one-variadic variadic env)
+      (check-only-one-fixed-arity fixed-arities env)
+      (check-fixed-arities-against-variadic variadic? variadic meths-exprs env)
+      ;; construct AST node
+      (merge {:op              :fn
+              :env             env
+              :form            form
+              :variadic?       variadic?
+              :max-fixed-arity max-arity
+              :methods         meths-exprs
+              :once            once?
+              :children        (conj (if name [:local] []) :methods)}
+             (when name
+               {:local name-expr})))))
+
+(defn ^:private init-form-analyzer [form env]
+  (fn
+    ([])
+    ([init]
+      {:init init})
+    ([doc init]
+      (check-doc-string doc form env)
+      {:init init :doc doc})))
+
+(defn parse-def [form env]
+  (let [sym  (second form)
+        expr (nnext form)
+        ns   (:ns env)]
+    (check-arity form env 0 3)
+    (check-symbol sym form env)
+    (check-namespace sym form env)
+    (let [init-fn   (init-form-analyzer form env)
+          args      (apply init-fn expr)
+          doc       (or (:doc args) (-> sym meta :doc))
+          arglists  (when-let [arglists (:arglists (meta sym))]
+                      (second arglists))
+          sym       (with-meta (symbol (name sym))
+                      (merge (meta sym)
+                             (when arglists
+                               {:arglists arglists})
+                             (when doc
+                               {:doc doc})
+                             (u/-source-info form env)))
+          var       (create-var sym env)
+          _         (env/deref-env)
+          _         (swap! env/*env* assoc-in
+                           [:namespaces ns :mappings sym]
+                           var)
+          meta      (merge (meta sym)
+                           (when arglists
+                             {:arglists (list 'quote arglists)}))
+          meta-expr (when meta (analyze-form meta (u/ctx env :ctx/expr)))
+          args      (when-let [init (get args :init)]
+                      (assoc args :init
+                             (analyze-form init (u/ctx env :ctx/expr))))
+          init?     (:init args)
+          children  (into (into [] (when meta [:meta]))
+                          (when init? [:init]))]
+      (merge {:op   :def
+              :env  env
+              :form form
+              :name sym
+              :var  var}
+             (when meta
+               {:meta meta-expr})
+             args
+             (when-not (empty? children)
+               {:children children})))))
+
+(defmethod -analyze-form :symbol
+  [form env]
+  (analyze-symbol form env))
+
+(defmethod -analyze-form :seq
+  [form env]
+  (if-let [form (seq form)]
+    (analyze-seq form env)
+    (analyze-const form env)))
+
+(defmethod -analyze-form :default
+  [form env]
+  (analyze-const form env))
+
+(defmethod -parse 'do [form env]
+  (parse-do form env))
+
+(defmethod -parse 'if [form env]
+  (parse-if form env))
+
+(defmethod -parse 'new [form env]
+  (parse-new form env))
+
+(defmethod -parse 'quote [form env]
+  (parse-quote form env))
+
+(defmethod -parse 'let* [form env]
+  (parse-let* form env))
+
+(defmethod -parse 'loop* [form env]
+  (parse-loop* form env))
+
+(defmethod -parse 'recur [form env]
+  (parse-recur form env))
+
+(defmethod -parse 'fn* [form env]
+  (parse-fn* form env))
+
+(defmethod -parse 'def [form env]
+  (parse-def form env))
+
+(defmethod -parse :default [form env]
+  (parse-invoke form env))
