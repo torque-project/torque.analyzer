@@ -1,0 +1,187 @@
+;; -*- mode: clojure;-*-
+
+(ns torque.analyzer.torque
+  (:require
+    [torque.analyzer :as a]
+    [torque.analyzer.env :as e]
+    [torque.analyzer.utils :as u]
+    [torque.analyzer.resolver :as r]
+    [torque.io :as io]
+    [torque.reader :as rdr]))
+
+(def ^:dynamic *resolver*)
+
+(def ^:dynamic *eval*)
+
+(def *protocol-id* (atom 0))
+
+(declare analyze)
+
+;; TODO: don't do incremental ids. we vould use timestamps
+;; or some other form of id, which doesn't depend on a stored
+;; counter
+(defn next-protocol-id []
+  (swap! *protocol-id* inc))
+
+(defn create-var [sym env]
+  (with-meta {:op   :var
+              :name sym
+              :ns   (:ns env)}
+    (meta sym)))
+
+(defn var? [x]
+  (= :var (:op x)))
+
+(defn macroexpand-1 [x env]
+  x)
+
+(defn ^:private throw-does-not-start-with-ns [ns]
+  (throw
+    (ex-info (str "Namespace file does not start with ns form: " ns)
+      {:ns ns})))
+
+(defn ^:private throw-ns-resource-not-found [ns]
+  (throw
+    (ex-info (str "Can't find physical resource for name space: " ns)
+      {:ns ns})))
+
+(defn load-ns [sym]
+  (if-let [lookup (r/resolve-ns *resolver* sym)]
+    (with-resource [stream (:file lookup)]
+      (binding [*resolver* (r/project-resolver (:project lookup))]
+        (let [stream (rdr/io-stream (io/buffered stream 80))
+              ns     (rdr/read stream)]
+          (if (= (:op ns) :ns)
+            (loop [out []]
+              ;; TODO: bind reader environment
+              (let [o (rdr/read stream)]
+                (if-not (= o :torque.reader/eof)
+                  (let [ast (analyze o)]
+                    (recur (conj out ast)))
+                  (swap! e/*env* update-in
+                         [:namespaces sym :top-level]
+                         out))))
+            (throw-does-not-start-with-ns ns)))))
+    (throw-ns-resource-not-found sym)))
+
+(defn ensure-loaded [ns env]
+  (or (u/resolve-ns ns (e/deref-env))
+      (load-ns ns)))
+
+(defn ^:private simplify-deps [form]
+  ;; TODO: convert use to require
+  )
+
+(defn ^:private deps->map [dependencies]
+  (reduce
+    (fn [m x]
+      (assoc m (first x)
+        (reduce
+          (fn [m y]
+            (if (vector? y)
+              (assoc m (first y) (apply hash-map (rest y)))
+              (assoc m y {})))
+          {}
+          (next x))))
+    {}
+    dependencies))
+
+(defn ^:private resolve-requires [requires env]
+  (reduce
+    (fn [m dep]
+      (let [lib   (first dep)
+            opts  (second dep)
+            as    (:as opts)
+            refer (:refer opts)]
+        ;; load namespace recursively
+        (ensure-loaded lib env)
+        ;; update env an namespace AST
+        (cond-> m
+          as    (assoc-in [:aliases as] lib)
+          refer (identity))))
+    {}
+    requires))
+
+(defn ^:private resolve-deps [dependencies env]
+  (resolve-requires (:require dependencies) env))
+
+(defn ^:private populate-env [name form env]
+  (let [dependencies  (-> form deps->map)
+        resolved-deps (resolve-deps dependencies env)]
+    (swap! e/*env* assoc :ns name)
+    (swap! e/*env* assoc-in [:namespaces name]
+           (merge {:ns name}
+                  resolved-deps))
+    dependencies))
+
+(defmulti parse (fn [form env] (first form)))
+
+(defmethod parse :default [form env]
+  (a/-parse form env))
+
+(defmethod parse 'ns [form env]
+  (let [name (second form)
+        args (nnext form)
+        doc  (if (string? (first args))
+               (first args)
+               nil)
+        opts (populate-env name
+               (if doc
+                 (rest args)
+                 args)
+               env)]
+    (merge
+      {:op      :ns
+       :env     env
+       :form    form
+       :name    name
+       :depends (set (keys (:require opts)))}
+      (when doc
+        {:doc doc}))))
+
+(defmethod parse 'dispatch* [form env]
+  (let [spec     (next form)
+        protocol (a/analyze-form (first spec) env)
+        method   (second spec)
+        args     (mapv (a/analyze-in-env env) (nnext spec))]
+    {:op       :dispatch
+     :form     form
+     :protocol protocol
+     :method   method
+     :args     (vec args)}))
+
+(defmethod parse 'protocol* [form env]
+  (let [name (second form)]
+    {:op   :protocol
+     :form form
+     :id   (next-protocol-id)}))
+
+(defmethod parse 'defprotocol [form env]
+  (let [name  (second form)
+        decl  (nnext form)
+        args  (if (string? (first decl))
+                [(first decl) (next decl)]
+                [nil decl])
+        doc   (first args)
+        meths (second args)]
+    (a/parse-do
+     `(do
+        (def ~name (protocol* ~name))
+        ~@(map (fn [meth id]
+                 (let [sym  (first meth)
+                       sigs (rest meth)]
+                   `(def ~sym
+                      (fn* ~sym
+                        ~(map (fn [sig]
+                                (->> `(dispatch* ~name ~id ~@sig)
+                                     (list sig)))
+                              sigs)))))
+               meths (range)))
+     env)))
+
+(defn analyze [form]
+  (binding [a/parse         parse
+            a/macroexpand-1 macroexpand-1
+            a/create-var    create-var
+            a/var?          var?]
+    (a/analyze form (e/deref-env))))

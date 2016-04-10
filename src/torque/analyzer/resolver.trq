@@ -1,0 +1,35 @@
+(ns torque.analyzer.resolver
+  (:require
+    [torque.io.fs  :as fs]
+    [torque.string :as str]))
+
+(defprotocol Resolver
+  (resolve-ns [_ ns]))
+
+(defn ns->path [ns]
+  (reduce fs/cd (fs/path) (str/split (name ns) ".")))
+
+(defn select-path [path relative-path]
+  (let [project-path (fs/cd path "src" relative-path)
+        namespace    (str project-path ".trq")]
+    (when (fs/exists? namespace)
+      {:file    (fs/open namespace :read :sequential)
+       :project (str path)})))
+
+(deftype ProjectResolver [path deps]
+  Resolver
+  (resolve-ns [_ ns]
+    (let [relative-path (ns->path ns)]
+      (or (select-path path relative-path)
+          (some (fn [dep]
+                  (select-path dep relative-path))
+                deps)))))
+
+(defn scan [path]
+  (fs/readdir path))
+
+(defn project-resolver
+  "Creates a resolver from a path to a project"
+  [path]
+  (let [deps (scan (str path "/deps"))]
+    (new ProjectResolver (fs/path path) deps)))
