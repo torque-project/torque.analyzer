@@ -176,7 +176,7 @@
       [statements e])))
 
 (defn parse-do [form env]
-  let [exprs          (rest form)
+  (let [exprs          (rest form)
         statements-env (u/ctx env :ctx/statement)
         block          (parse-block exprs)
         statements     (mapv

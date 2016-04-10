@@ -53,7 +53,7 @@
               ns     (rdr/read stream)]
           (if (= (:op ns) :ns)
             (loop [out []]
-              ;; TODO: bind reader environment
+              ;; TODO: bind reader environment for syntax quote, etc.
               (let [o (rdr/read stream)]
                 (if-not (= o :torque.reader/eof)
                   (let [ast (analyze o)]
