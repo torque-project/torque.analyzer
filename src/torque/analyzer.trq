@@ -465,6 +465,9 @@
                           [nil (seq args)])
           name          (first fndecl)
           meths         (second fndecl)
+          meths         (if (vector? (first meths))
+                          (list meths)
+                          meths)
           name-expr     {:op    :binding
                          :env   env
                          :form  name

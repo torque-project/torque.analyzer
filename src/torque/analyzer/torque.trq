@@ -50,7 +50,7 @@
     (with-resource [stream (:file lookup)]
       (binding [*resolver* (r/project-resolver (:project lookup))]
         (let [stream (rdr/io-stream (io/buffered stream 80))
-              ns     (rdr/read stream)]
+              ns     (analyze (rdr/read stream))]
           (if (= (:op ns) :ns)
             (loop [out []]
               ;; TODO: bind reader environment for syntax quote, etc.
@@ -58,8 +58,8 @@
                 (if-not (= o :torque.reader/eof)
                   (let [ast (analyze o)]
                     (recur (conj out ast)))
-                  (swap! e/*env* update-in
-                         [:namespaces sym :top-level]
+                  (swap! e/*env* assoc-in
+                         [:namespaces sym :forms]
                          out))))
             (throw-does-not-start-with-ns ns)))))
     (throw-ns-resource-not-found sym)))
