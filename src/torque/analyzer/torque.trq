@@ -17,7 +17,7 @@
 
 (declare analyze)
 
-;; TODO: don't do incremental ids. we vould use timestamps
+;; TODO: don't do incremental ids. we should use timestamps
 ;; or some other form of id, which doesn't depend on a stored
 ;; counter
 (defn next-protocol-id []
@@ -150,12 +150,6 @@
      :method   method
      :args     (vec args)}))
 
-(defmethod parse 'protocol* [form env]
-  (let [name (second form)]
-    {:op   :protocol
-     :form form
-     :id   (next-protocol-id)}))
-
 (defmethod parse 'defprotocol [form env]
   (let [name  (second form)
         decl  (nnext form)
@@ -164,20 +158,88 @@
                 [nil decl])
         doc   (first args)
         meths (second args)]
+    (swap! e/*env* assoc-in
+           [:namespaces (:ns env) :mappings name]
+           {:op        :var
+            :protocol? true
+            :form      form
+            :name      name
+            :meths     meths
+            :id        (next-protocol-id)})
     (a/parse-do
-     `(do
-        (def ~name (protocol* ~name))
-        ~@(map (fn [meth id]
-                 (let [sym  (first meth)
-                       sigs (rest meth)]
-                   `(def ~sym
-                      (fn* ~sym
-                        ~(map (fn [sig]
-                                (->> `(dispatch* ~name ~id ~@sig)
-                                     (list sig)))
-                              sigs)))))
-               meths (range)))
-     env)))
+      `(do
+         ~@(map (fn [meth id]
+                  (let [sym  (first meth)
+                        sigs (rest meth)]
+                    `(def ~sym
+                       (fn* ~sym
+                            ~@(map (fn [sig]
+                                     (->> `(dispatch* ~name ~id ~@sig)
+                                          (list sig)))
+                                   sigs)))))
+                meths (range))
+         nil
+         ;; ~name
+         )
+      env)))
+
+(defn ^:private analyze-extensions [extensions env]
+  (loop [protos extensions
+         out    []]
+    (if-let [sym (first protos)]
+      ;; TODO: check impls against protocol
+      (let [proto (u/resolve-sym sym env)
+            meths (take-while (complement symbol?) (next protos))
+            ops   (->> meths
+                       (mapv
+                         (fn [meth]
+                           (assoc (a/analyze-fn-method (next meth) env)
+                             :name         (first meth)
+                             ;; :closed-overs (:locals env)
+                             )))
+                       (group-by :name)
+                       (vector :methods)
+                       (conj {:op :extension :protocol proto}))]
+        (recur (nthrest protos (inc (count ops)))
+               (conj out ops)))
+      out)))
+
+(defmethod parse 'deftype [form env]
+  (let [name   (second form)
+        spec   (nnext form)
+        decl   (if (string? (second spec))
+                 [(second spec) (nnext spec)]
+                 [nil (next spec)])
+        doc    (nth decl 0)
+        fields (into {}
+                     (mapv
+                       (fn [field id]
+                          {:op       :binding
+                           :env      env
+                           :form     field
+                           :name     field
+                           :field-id id
+                           :local    :field})
+                       (first spec) (range)))
+        tenv   (assoc-in env [:locals] fields)
+        exts   (analyze-extensions (nth decl 1) tenv)]
+    ;; TODO: noly use the var from and special case it
+    ;; in the compiler ?
+    (swap! e/*env* assoc-in
+           [:namespaces (:ns env) :mappings name]
+           {:op         :var
+            :type?      true
+            :form       form
+            :name       name
+            :extensions exts})
+    (merge
+      {:op         :deftype
+       :env        env
+       :name       name
+       :fields     fields
+       :extensions exts}
+      (when doc
+        {:doc doc}))))
 
 (defn analyze [form]
   (binding [a/parse         parse
