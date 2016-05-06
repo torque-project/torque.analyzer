@@ -57,6 +57,8 @@
               (let [o (rdr/read stream)]
                 (if-not (= o :torque.reader/eof)
                   (let [ast (analyze o)]
+                    ;; eval form so we can use it in macros
+                    (*eval* ast)
                     (recur (conj out ast)))
                   (swap! e/*env* assoc-in
                          [:namespaces sym :forms]

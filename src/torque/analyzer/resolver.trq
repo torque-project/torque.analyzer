@@ -25,8 +25,15 @@
                   (select-path dep relative-path))
                 deps)))))
 
-(defn scan [path]
-  (fs/readdir path))
+(defn scan
+  "Create a list of sub directories of path, excluding . and .."
+  [path]
+  (->> (fs/readdir path)
+       (filter (fn [x]
+                 (and (= :directory (fs/entry-type x))
+                      (not (or (= (fs/entry-name x) ".")
+                               (= (fs/entry-name x) ".."))))))
+       (map (fn [x] (fs/cd path (fs/entry-name x))))))
 
 (defn project-resolver
   "Creates a resolver from a path to a project"
