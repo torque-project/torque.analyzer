@@ -194,9 +194,7 @@
                        (mapv
                          (fn [meth]
                            (assoc (a/analyze-fn-method (next meth) env)
-                             :name         (first meth)
-                             ;; :closed-overs (:locals env)
-                             )))
+                             :name (first meth))))
                        (group-by :name)
                        (vector :methods)
                        (conj {:op :extension :protocol proto}))]
@@ -211,20 +209,17 @@
                  [(second spec) (nnext spec)]
                  [nil (next spec)])
         doc    (nth decl 0)
-        fields (into {}
-                     (mapv
-                       (fn [field id]
-                          {:op       :binding
-                           :env      env
-                           :form     field
-                           :name     field
-                           :field-id id
-                           :local    :field})
-                       (first spec) (range)))
-        tenv   (assoc-in env [:locals] fields)
+        fields (mapv
+                 (fn [field id]
+                   {:op       :binding
+                    :env      env
+                    :form     field
+                    :name     field
+                    :field-id id
+                    :local    :field})
+                 (first spec) (range))
+        tenv   (assoc-in env [:locals] (zipmap (map :name fields) fields))
         exts   (analyze-extensions (nth decl 1) tenv)]
-    ;; TODO: noly use the var from and special case it
-    ;; in the compiler ?
     (swap! e/*env* assoc-in
            [:namespaces (:ns env) :mappings name]
            {:op         :var
