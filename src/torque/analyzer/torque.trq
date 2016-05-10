@@ -121,7 +121,7 @@
       (let [lib (first dep)]
         (ensure-loaded lib env)
         (refer-ns m
-          (-> (e/deref-env) :namspaces (get lib))
+          (-> (e/deref-env) :namespaces (get lib))
           :all)))
     m
     inherits))
@@ -227,7 +227,7 @@
                        (group-by :name)
                        (vector :methods)
                        (conj {:op :extension :protocol proto}))]
-        (recur (nthrest protos (inc (count ops)))
+        (recur (nthrest protos (inc (count meths)))
                (conj out ops)))
       out)))
 
