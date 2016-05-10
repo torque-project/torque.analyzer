@@ -10,6 +10,7 @@
   (reduce fs/cd (fs/path) (str/split (name ns) ".")))
 
 (defn select-path [path relative-path]
+  ;; TODO: there be a bug here that modifies path destructively
   (let [project-path (fs/cd path "src" relative-path)
         namespace    (str project-path ".trq")]
     (when (fs/exists? namespace)

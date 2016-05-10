@@ -13,7 +13,7 @@
 
 (def ^:dynamic *eval*)
 
-(def *protocol-id* (atom 0))
+(def *protocol-id* (atom -1))
 
 (declare analyze)
 
@@ -55,6 +55,7 @@
             (loop [out []]
               ;; TODO: bind reader environment for syntax quote, etc.
               (let [o (rdr/read stream)]
+                ;; (print o)
                 (if-not (= o :torque.reader/eof)
                   (let [ast (analyze o)]
                     ;; eval form so we can use it in macros
@@ -88,24 +89,46 @@
     {}
     dependencies))
 
-(defn ^:private resolve-requires [requires env]
+(defn ^:private filter-referal [filter lib]
+  (if (= filter :all)
+    (:mappings lib)
+    (select-keys filter (:mappings lib))))
+
+(defn ^:private refer-ns [ns lib filter]
+  (update-in ns [:mappings] merge (filter-referal filter lib)))
+
+(defn ^:private resolve-requires [m requires env]
   (reduce
     (fn [m dep]
-      (let [lib   (first dep)
-            opts  (second dep)
-            as    (:as opts)
-            refer (:refer opts)]
+      (let [lib     (first dep)
+            opts    (second dep)
+            as      (:as opts)
+            refer   (:refer opts)]
         ;; load namespace recursively
         (ensure-loaded lib env)
         ;; update env an namespace AST
         (cond-> m
-          as    (assoc-in [:aliases as] lib)
-          refer (identity))))
-    {}
+          as      (assoc-in [:aliases as] lib)
+          refer   (refer-ns
+                    (-> (e/deref-env) :namespaces (get lib))
+                    refer))))
+    m
     requires))
 
+(defn ^:private resolve-inherits [m inherits env]
+  (reduce
+    (fn [m dep]
+      (let [lib (first dep)]
+        (ensure-loaded lib env)
+        (refer-ns m
+          (-> (e/deref-env) :namspaces (get lib))
+          :all)))
+    m
+    inherits))
+
 (defn ^:private resolve-deps [dependencies env]
-  (resolve-requires (:require dependencies) env))
+  (-> (resolve-requires {}  (:require dependencies) env)
+      (resolve-inherits (:inherit dependencies) env)))
 
 (defn ^:private populate-env [name form env]
   (let [dependencies  (-> form deps->map)
@@ -152,6 +175,16 @@
      :method   method
      :args     (vec args)}))
 
+(defmethod parse 'protocol* [form env]
+  (let [name  (second form)
+        id    (first (nnext form))
+        meths (nthrest form 3)]
+    {:op    :protocol
+     :form  form
+     :name  name
+     :meths (vec meths)
+     :id    id}))
+
 (defmethod parse 'defprotocol [form env]
   (let [name  (second form)
         decl  (nnext form)
@@ -159,17 +192,11 @@
                 [(first decl) (next decl)]
                 [nil decl])
         doc   (first args)
+        id    (next-protocol-id)
         meths (second args)]
-    (swap! e/*env* assoc-in
-           [:namespaces (:ns env) :mappings name]
-           {:op        :var
-            :protocol? true
-            :form      form
-            :name      name
-            :meths     meths
-            :id        (next-protocol-id)})
     (a/parse-do
       `(do
+         (def ~name (protocol* ~name ~id ~@meths))
          ~@(map (fn [meth id]
                   (let [sym  (first meth)
                         sigs (rest meth)]
@@ -222,6 +249,7 @@
                  (first spec) (range))
         tenv   (assoc-in env [:locals] (zipmap (map :name fields) fields))
         exts   (analyze-extensions (nth decl 1) tenv)]
+    ;; TODO: should do this in 'def
     (swap! e/*env* assoc-in
            [:namespaces (:ns env) :mappings name]
            {:op         :var
@@ -237,6 +265,17 @@
        :extensions exts}
       (when doc
         {:doc doc}))))
+
+(defmethod parse 'def [form env]
+  (let [parsed   (a/-parse form env)
+        protocol (:init parsed)]
+    (when (= (:op protocol) :protocol)
+      (swap! e/*env* update-in
+             [:namespaces (:ns env) :mappings (:name parsed) :var]
+             merge
+             (dissoc protocol :op)
+             {:protocol? true}))
+    parsed))
 
 (defn analyze [form]
   (binding [a/parse         parse
