@@ -229,6 +229,17 @@
      :val      val
      :children [:target :val]}))
 
+(defn parse-dot [form env]
+  (check-arity form env 3)
+  (let [target (analyze-form (second form) (u/ctx env :ctx/expr))
+        sym    (nth form 2)]
+    {:op       :type-field
+     :form     form
+     :env      env
+     :target   target
+     :field    (symbol (name sym))
+     :children [:target]}))
+
 (defn validate-bindings [form env]
   (let [op       (first form)
         bindings (second form)]
@@ -581,6 +592,9 @@
 
 (defmethod -parse 'new [form env]
   (parse-new form env))
+
+(defmethod -parse '. [form env]
+  (parse-dot form env))
 
 (defmethod -parse 'quote [form env]
   (parse-quote form env))
