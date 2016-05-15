@@ -247,16 +247,15 @@
                     :field-id id
                     :local    :field})
                  (first spec) (range))
+        ;; TODO: should do this in 'def
+        _ (swap! e/*env* assoc-in
+                 [:namespaces (:ns env) :mappings name]
+                 {:op         :var
+                  :type?      true
+                  :form       form
+                  :name       name})
         tenv   (assoc-in env [:locals] (zipmap (map :name fields) fields))
         exts   (analyze-extensions (nth decl 1) tenv)]
-    ;; TODO: should do this in 'def
-    (swap! e/*env* assoc-in
-           [:namespaces (:ns env) :mappings name]
-           {:op         :var
-            :type?      true
-            :form       form
-            :name       name
-            :extensions exts})
     (merge
       {:op         :deftype
        :env        env
