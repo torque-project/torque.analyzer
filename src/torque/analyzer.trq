@@ -433,7 +433,7 @@
     (let [variadic?    (boolean (some #{'&} params))
           param-names  (if variadic?
                          ;; TODO: should use pop and peek here
-                         (conj (last (last params)) (first params))
+                         (conj (vec (butlast (butlast params))) (last params))
                          params)
           env          (dissoc env :local)
           arity        (count param-names)
