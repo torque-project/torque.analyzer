@@ -14,7 +14,7 @@
 
 (defmulti -analyze-form (fn [form _] (u/classify form)))
 
-(defmulti -parse (fn [form _] (first form)))
+(defmulti -parse (fn [form _] (let [sym (first form)] sym)))
 
 (def ^:dynamic analyze-form
   -analyze-form)
@@ -107,8 +107,8 @@
       (if (= form mform)
         (parse mform env)
         (let [result (analyze-form mform env)]
-              ;;resolved (u/resolve-sym op env)
-              ;;meta     (vary-meta form assoc ::resolved-op resolved)
+          ;;resolved (u/resolve-sym op env)
+          ;;meta     (vary-meta form assoc ::resolved-op resolved)
           ;;(update-in [:raw-forms] (fnil conj ()) meta)
           result)))))
 
@@ -579,6 +579,17 @@
   (if-let [form (seq form)]
     (analyze-seq form env)
     (analyze-const form env)))
+
+(defmethod -analyze-form :vector
+  [form env]
+  (let [items-env (u/ctx env :ctx/expr)
+        items     (mapv (analyze-in-env items-env) form)]
+    ;; (wrapping-meta)
+    {:op       :vector
+     :env      env
+     :items    items
+     :form     form
+     :children [:items]}))
 
 (defmethod -analyze-form :default
   [form env]

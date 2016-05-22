@@ -10,10 +10,16 @@
     [torque.reader :as rdr]))
 
 (def ^:dynamic *resolver*)
-
 (def ^:dynamic *eval*)
 
 (def *protocol-id* (atom -1))
+
+(def specials
+  (hash-set
+    'ns 'fn* 'if 'let* 'loop* 'recur 'do 'binding*
+    'defprotocol 'protocol* 'deftype 'dispatch*
+    'quote 'def 'new 'set! '. 'apply*
+    'so* 'import* 'invoke*))
 
 (declare analyze)
 
@@ -24,16 +30,27 @@
   (swap! *protocol-id* inc))
 
 (defn create-var [sym env]
-  (with-meta {:op   :var
-              :name sym
-              :ns   (:ns env)}
-    (meta sym)))
+  {:op   :var
+   :name sym
+   :ns   (:ns env)
+   :meta (meta sym)})
 
 (defn var? [x]
   (= :var (:op x)))
 
-(defn macroexpand-1 [x env]
-  x)
+(defn builtin? [sym]
+  (some-> (namespace sym) (= "torque.core.builtin")))
+
+(defn macroexpand-1 [form env]
+  (if (and (seq? form))
+    (let [sym (first form)]
+      (if (not (or (specials sym) (builtin? sym)))
+        (when-let [macro (resolve sym)]
+          (if (-> macro meta :macro)
+            (spy (apply @macro (rest form)))
+            form))
+        form))
+    form))
 
 (defn ^:private throw-does-not-start-with-ns [ns]
   (throw
@@ -46,24 +63,28 @@
       {:ns ns})))
 
 (defn load-ns [sym]
+  (println "LOADING: " sym)
   (if-let [lookup (r/resolve-ns *resolver* sym)]
     (with-resource [stream (:file lookup)]
       (binding [*resolver* (r/project-resolver (:project lookup))]
         (let [stream (rdr/io-stream (io/buffered stream 80))
               ns     (analyze (rdr/read stream))]
           (if (= (:op ns) :ns)
-            (loop [out []]
-              ;; TODO: bind reader environment for syntax quote, etc.
-              (let [o (rdr/read stream)]
-                ;; (print o)
-                (if-not (= o :torque.reader/eof)
-                  (let [ast (analyze o)]
-                    ;; eval form so we can use it in macros
-                    (*eval* ast)
-                    (recur (conj out ast)))
-                  (swap! e/*env* assoc-in
-                         [:namespaces sym :forms]
-                         out))))
+            ;; TODO: when not bootstrapping anymore, we would have to
+            ;; eval the ns statement, too
+            (binding [*ns* (the-ns (:name ns))]
+              (loop [out []]
+                ;; TODO: bind reader environment for syntax quote, etc.
+                (let [o (rdr/read stream)]
+                  ;; (print o)
+                  (if-not (= o :torque.reader/eof)
+                    (let [ast (analyze o)]
+                      ;; eval form so we can use it in macros
+                      (*eval* ast)
+                      (recur (conj out ast)))
+                    (swap! e/*env* assoc-in
+                           [:namespaces sym :forms]
+                           out)))))
             (throw-does-not-start-with-ns ns)))))
     (throw-ns-resource-not-found sym)))
 
@@ -232,7 +253,7 @@
       out)))
 
 (defmethod parse 'deftype [form env]
-  (let [name   (second form)
+  (let [sym    (second form)
         spec   (nnext form)
         decl   (if (string? (second spec))
                  [(second spec) (nnext spec)]
@@ -249,17 +270,17 @@
                  (first spec) (range))
         ;; TODO: should do this in 'def
         _ (swap! e/*env* assoc-in
-                 [:namespaces (:ns env) :mappings name]
+                 [:namespaces (:ns env) :mappings sym]
                  {:op         :var
                   :type?      true
                   :form       form
-                  :name       name})
+                  :name       sym})
         tenv   (assoc-in env [:locals] (zipmap (map :name fields) fields))
         exts   (analyze-extensions (nth decl 1) tenv)]
     (merge
       {:op         :deftype
        :env        env
-       :name       name
+       :name       sym
        :fields     fields
        :extensions exts}
       (when doc
