@@ -76,7 +76,7 @@
               (loop [out []]
                 ;; TODO: bind reader environment for syntax quote, etc.
                 (let [o (rdr/read stream)]
-                  ;; (print o)
+                  (print o)
                   (if-not (= o :torque.reader/eof)
                     (let [ast (analyze o)]
                       ;; eval form so we can use it in macros

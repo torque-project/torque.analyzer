@@ -591,6 +591,18 @@
      :form     form
      :children [:items]}))
 
+(defmethod -analyze-form :map
+  [form env]
+  (let [kv-env (u/ctx env :ctx/expr)
+        ks     (mapv (analyze-in-env kv-env) (keys form))
+        vs     (mapv (analyze-in-env kv-env) (vals form))]
+    {:op       :map
+     :env      env
+     :keys     ks
+     :vals     vs
+     :form     form
+     :children [:keys :vals]}))
+
 (defmethod -analyze-form :default
   [form env]
   (analyze-const form env))
