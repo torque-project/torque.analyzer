@@ -28,6 +28,10 @@
 
 (def ^:dynamic var?)
 
+(defn resolve-var [sym env]
+  (let [v (u/resolve-sym sym env)]
+    (and (var? v) v)))
+
 (defn analyze [form env]
   (assoc (analyze-form form env) :top-level true))
 
@@ -57,36 +61,41 @@
          ;; collection literals
          :children [:meta]}))))
 
+(defn ^:private local-binding [sym env]
+  (when-let [local-binding (-> env :locals (get sym))]
+    (let [mutable      (:mutable local-binding)
+          children     (:children local-binding)]
+      (merge (dissoc local-binding :init)
+             {:op           :local
+              :assignable?  (boolean mutable)
+              :children     (vec (remove #{:init} children))}))))
+
+(defn ^:private global-binding [sym env]
+  (when-let [var (resolve-var sym env)]
+    (let [m (meta var)]
+      ;; we cannot statically determine if a Var is in a
+      ;; thread-local context so checking whether it's dynamic
+      ;; or not is the most we can do
+      {:op          :var
+       :assignable? (u/dynamic? var m)
+       :var         var
+       :meta        m})))
+
+(defn ^:private host-form [sym env]
+  (if-let [maybe-class (namespace sym)]
+    {:op    :maybe-host-form
+     :class (symbol maybe-class)
+     :field (symbol (name sym))}
+    {:op    :maybe-class
+     :class sym}))
+
 (defn analyze-symbol
   [sym env]
   (let [mform (macroexpand-1 sym env)]
     (if (= mform sym)
-      (merge (if-let [local-binding (-> env :locals (get sym))]
-               (let [mutable       (:mutable local-binding)
-                     children      (:children local-binding)]
-                 (merge (dissoc local-binding :init)
-                        {:op          :local
-                         :assignable? (boolean mutable)
-                         :children    (vec (remove #{:init} children))}))
-               (if-let [var (let [v (u/resolve-sym sym env)]
-                              (and (var? v) v))]
-                 (let [m (meta var)]
-                   ;; we cannot statically determine if a Var is in a
-                   ;; thread-local context so checking whether it's dynamic
-                   ;; or not is the most we can do
-                   {:op          :var
-                    :assignable? (u/dynamic? var m)
-                    :var         var
-                    :meta        m})
-                 ;; e.g. js/foo.bar or Long/MAX_VALUE
-                 (if-let [maybe-class (namespace sym)]
-                   (let [maybe-class (symbol maybe-class)]
-                     {:op    :maybe-host-form
-                      :class maybe-class
-                      :field (symbol (name sym))})
-                   ;; e.g. java.lang.Integer or Long
-                   {:op    :maybe-class
-                    :class mform})))
+      (merge (or (local-binding sym env)
+                 (global-binding sym env)
+                 (host-form sym env))
              {:env  env
               :form mform})
       (-> (analyze-form mform env)
@@ -219,13 +228,14 @@
      :children [:expr]}))
 
 (defn parse-set! [form env]
-  (check-arity form env 3)
+  (check-arity form env 4)
   (let [target (analyze-form (second form) (u/ctx env :ctx/expr))
-        val    (analyze-form (nth form 2) (u/ctx env :ctx/expr))]
+        val    (analyze-form (nth form 3) (u/ctx env :ctx/expr))]
     {:op       :set!
      :env      env
      :form     form
      :target   target
+     :field    (nth form 2)
      :val      val
      :children [:target :val]}))
 
@@ -618,6 +628,9 @@
 
 (defmethod -parse '. [form env]
   (parse-dot form env))
+
+(defmethod -parse 'set! [form env]
+  (parse-set! form env))
 
 (defmethod -parse 'quote [form env]
   (parse-quote form env))

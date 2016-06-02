@@ -1,0 +1,17 @@
+(ns torque.analyzer.ast)
+
+(defn is? [ast op]
+  (= (:op ast) op))
+
+(defn ^:private children
+  ([ast]
+   (map
+     (fn [type]
+       (vector type (get ast type)))
+     (:children ast)))
+  ([ast nodes]
+   (reduce
+     (fn [ast [type nodes]]
+       (assoc ast type nodes))
+     ast
+     nodes)))

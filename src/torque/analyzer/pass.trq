@@ -1,0 +1,37 @@
+;; -*- mode: clojure;-*-
+
+(ns torque.analyzer.pass)
+
+(defn ^:private descend [f children]
+  (reduce
+    (fn [v [type nodes]]
+      (if (vector? nodes)
+        (conj v (vector type (mapv f nodes)))
+        (conj v (vector type (f nodes)))))
+    []
+    children))
+
+(defn transduce
+  "Run a transducer on a tree given by `root` and a child selector
+   function `children`. Calls `in` when first visiting a node and
+   `out` after visiting all children. `in` and out may return a new
+   tree node, which will be replaced with the original node in the
+   tree."
+  [root children in out]
+  (let [in-root (in root)]
+    (->> (children in-root)
+         (descend (fn [node] (transduce node children in out)))
+         (children in-root)
+         (out))))
+
+(defn top-down
+  "Run a top down transducer given by `root` and a child
+   selector function `children`."
+  [root children f]
+  (transduce root children f identity))
+
+(defn bottom-up
+  "Run a bottom up transducer given by `root` and a child
+   selector function `children`."
+  [root children f]
+  (transduce root children identity f))
