@@ -496,7 +496,7 @@
                          :name  name}
           e             (if name
                           (assoc (assoc-in env
-                                           [:local name]
+                                           [:locals name]
                                            (u/dissoc-env name-expr))
                                  :local name-expr)
                           env)
@@ -516,6 +516,7 @@
       (check-fixed-arities-against-variadic variadic? variadic meths-exprs env)
       ;; construct AST node
       (merge {:op              :fn
+              :name            name
               :env             env
               :form            form
               :variadic?       variadic?

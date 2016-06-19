@@ -48,10 +48,11 @@
   (if (and (seq? form))
     (let [sym (first form)]
       (if (not (or (specials sym) (builtin? sym)))
-        (when-let [macro (resolve sym)]
+        (if-let [macro (resolve sym)]
           (if (-> macro meta :macro)
             (apply @macro (rest form))
-            form))
+            form)
+          form)
         form))
     form))
 
@@ -66,18 +67,24 @@
       ast)
     ast))
 
+(defn ^:private close-over [sym]
+  (when (-> @*capture-context* peek :captured (get sym))
+    (swap! *capture-context*
+      (fn [v]
+        (update-in v [(dec (count v)) :closed-over] conj sym)))))
+
 (defn ^:private collect-closed-overs [ast]
   (cond
     (ast/is? ast :local)
       (do
-        (when (-> @*capture-context* peek :captured (get (:name ast)))
-          (swap! *capture-context*
-                 (fn [v]
-                   (update-in v [(dec (count v)) :closed-over] conj (:name ast)))))
+        (close-over (:name ast))
         ast)
     (ast/is? ast :fn)
       (let [captured (peek @*capture-context*)]
         (swap! *capture-context* pop)
+        (when (not-empty @*capture-context*)
+          (doseq [sym (:closed-over captured)]
+            (close-over sym)))
         (assoc ast :closing-over (:closed-over captured)))
     :else
       ast))
@@ -97,7 +104,7 @@
       {:ns ns})))
 
 (defn load-ns [sym]
-  ;; (println "LOADING: " sym)
+  (println "LOADING: " sym)
   (if-let [lookup (r/resolve-ns *resolver* sym)]
     (with-resource [stream (:file lookup)]
       (binding [*resolver* (r/project-resolver (:project lookup))]
@@ -182,16 +189,16 @@
     inherits))
 
 (defn ^:private resolve-deps [dependencies env]
-  (-> (resolve-requires {}  (:require dependencies) env)
+  (-> {}
+      (resolve-requires (:require dependencies) env)
       (resolve-inherits (:inherit dependencies) env)))
 
 (defn ^:private populate-env [name form env]
   (let [dependencies  (-> form deps->map)
         resolved-deps (resolve-deps dependencies env)]
     (swap! e/*env* assoc :ns name)
-    (swap! e/*env* assoc-in [:namespaces name]
-           (merge {:ns name}
-                  resolved-deps))
+    (swap! e/*env* assoc-in [:namespaces name] 
+           (merge {:ns name} resolved-deps))
     dependencies))
 
 (defmulti parse (fn [form env] (first form)))
@@ -279,9 +286,11 @@
                          (fn [meth]
                            (assoc (a/analyze-fn-method (next meth) env)
                              :name (first meth))))
+                       ;; FIXME: group by should probably be done later. just
+                       ;; have a flat list of methods here
                        (group-by :name)
                        (vector :methods)
-                       (conj {:op :extension :protocol proto}))]
+                       (conj {:op :extension :protocol proto :children [:methods]}))]
         (recur (nthrest protos (inc (count meths)))
                (conj out ops)))
       out)))
@@ -317,7 +326,8 @@
        :env        env
        :name       sym
        :fields     fields
-       :extensions exts}
+       :extensions exts
+       :children   [:fields :extensions]}
       (when doc
         {:doc doc}))))
 
