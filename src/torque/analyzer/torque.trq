@@ -38,6 +38,11 @@
    ;;:meta (meta sym)
    })
 
+(defn resolve-symbol [sym]
+  (if-let [var (u/resolve-sym sym (e/deref-env))]
+    (symbol (str (:ns var) "/" (:name var)))
+    sym))
+
 (defn var? [x]
   (= :var (:op x)))
 
@@ -113,7 +118,8 @@
           (if (= (:op ns) :ns)
             ;; TODO: when not bootstrapping anymore, we would have to
             ;; eval the ns statement, too
-            (binding [*ns* (the-ns (:name ns))]
+            (binding [*ns*                 (the-ns (:name ns))
+                      rdr/*resolve-symbol* resolve-symbol]
               (loop [out []]
                 ;; TODO: bind reader environment for syntax quote, etc.
                 (let [o (rdr/read stream)]
