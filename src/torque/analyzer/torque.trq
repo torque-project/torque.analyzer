@@ -49,10 +49,13 @@
 (defn builtin? [sym]
   (some-> (namespace sym) (= "torque.core.builtin")))
 
+(defn expandable? [sym]
+  (not (or (specials sym) (builtin? sym))))
+
 (defn macroexpand-1 [form env]
   (if (and (seq? form))
     (let [sym (first form)]
-      (if (not (or (specials sym) (builtin? sym)))
+      (if (and (symbol? sym) (expandable? sym))
         (if-let [macro (resolve sym)]
           (if (-> macro meta :macro)
             (apply @macro (rest form))
@@ -109,7 +112,7 @@
       {:ns ns})))
 
 (defn load-ns [sym]
-  (println "LOADING: " sym)
+  ;; (println "LOADING: " sym)
   (if-let [lookup (r/resolve-ns *resolver* sym)]
     (with-resource [stream (:file lookup)]
       (binding [*resolver* (r/project-resolver (:project lookup))]
@@ -324,7 +327,8 @@
                  {:op         :var
                   :type?      true
                   :form       form
-                  :name       sym})
+                  :name       sym
+                  :ns         (:ns env)})
         tenv   (assoc-in env [:locals] (zipmap (map :name fields) fields))
         exts   (analyze-extensions (nth decl 1) tenv)]
     (merge
