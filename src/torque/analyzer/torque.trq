@@ -283,6 +283,12 @@
          )
       env)))
 
+(defn ^:private make-extension [proto meths]
+  {:op       :extension
+   :protocol proto
+   :methods  meths
+   :children [:methods]})
+
 (defn ^:private analyze-extensions [extensions env]
   (loop [protos extensions
          out    []]
@@ -298,8 +304,7 @@
                        ;; FIXME: group by should probably be done later. just
                        ;; have a flat list of methods here
                        (group-by :name)
-                       (vector :methods)
-                       (conj {:op :extension :protocol proto :children [:methods]}))]
+                       (make-extension proto))]
         (recur (nthrest protos (inc (count meths)))
                (conj out ops)))
       out)))
@@ -342,15 +347,48 @@
         {:doc doc}))))
 
 (defmethod parse 'def [form env]
-  (let [parsed   (a/-parse form env)
-        protocol (:init parsed)]
-    (when (= (:op protocol) :protocol)
+  (let [parsed      (a/-parse form env)
+        init        (:init parsed)
+        special-var (cond
+                      (= (:op init) :protocol) {:protocol? true}
+                      (= (:op init) :so)       {:so? true})]
+    (when special-var
       (swap! e/*env* update-in
              [:namespaces (:ns env) :mappings (:name parsed) :var]
              merge
-             (dissoc protocol :op)
-             {:protocol? true}))
+             (dissoc init :op)
+             special-var))
     parsed))
+
+(defmethod parse 'so* [form env]
+  (let [lib (second form)]
+    (if (string? lib)
+      {:op  :so
+       :lib lib}
+      (throw
+        (ex-info "Library has to be given as string"
+          {:lib lib})))))
+
+(defmethod parse 'import* [form env]
+  (let [lib  (u/resolve-sym (second form) env)
+        name (nth form 2)]
+    (if (:so? (:var lib))
+      {:op   :import
+       :lib  lib
+       :name name}
+      (throw
+        (ex-info "Import does not reference a library"
+          {:lib lib :name name})))))
+
+(defmethod parse 'invoke* [form env]
+  (let [[_ ptr ret-sig arg-sig & args] form]
+    ;; TODO: verify arg sig
+    ;; TODO: verify args with arg sig
+    {:op      :invoke-ptr
+     :ret     ret-sig
+     :arg-sig (vec arg-sig)
+     :ptr     (a/analyze ptr env)
+     :args    (mapv (a/analyze-in-env env) args)}))
 
 (defn analyze [form]
   (binding [a/parse         parse
