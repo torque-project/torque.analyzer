@@ -384,11 +384,12 @@
   (let [[_ ptr ret-sig arg-sig & args] form]
     ;; TODO: verify arg sig
     ;; TODO: verify args with arg sig
-    {:op      :invoke-ptr
-     :ret     ret-sig
-     :arg-sig (vec arg-sig)
-     :ptr     (a/analyze ptr env)
-     :args    (mapv (a/analyze-in-env env) args)}))
+    {:op       :invoke-ptr
+     :ret      ret-sig
+     :arg-sig  (vec arg-sig)
+     :ptr      (a/analyze ptr env)
+     :args     (mapv (a/analyze-in-env env) args)
+     :children [:ptr :args]}))
 
 (defn analyze [form]
   (binding [a/parse         parse
