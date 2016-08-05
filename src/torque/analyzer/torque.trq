@@ -128,7 +128,8 @@
                 (let [o (rdr/read stream)]
                   ;; (print o)
                   (if-not (= o :torque.reader/eof)
-                    (let [ast (analyze o)]
+                    (let [env (assoc (e/deref-env) :ns (:name ns))
+                          ast (analyze o env)]
                       ;; eval form so we can use it in macros
                       (*eval* ast)
                       (recur (conj out ast)))
@@ -165,8 +166,16 @@
     (:mappings lib)
     (select-keys filter (:mappings lib))))
 
+(defn lookup-ns [sym]
+  (-> (e/deref-env) :namespaces (get sym)))
+
 (defn ^:private refer-ns [ns lib filter]
   (update-in ns [:mappings] merge (filter-referal filter lib)))
+
+(defn ^:private refer-core [ns]
+  (if-let [core (lookup-ns 'torque.core)]
+    (refer-ns ns core :all)
+    ns))
 
 (defn ^:private resolve-requires [m requires env]
   (reduce
@@ -180,9 +189,7 @@
         ;; update env an namespace AST
         (cond-> m
           as      (assoc-in [:aliases as] lib)
-          refer   (refer-ns
-                    (-> (e/deref-env) :namespaces (get lib))
-                    refer))))
+          refer   (refer-ns (lookup-ns lib) refer))))
     m
     requires))
 
@@ -191,22 +198,21 @@
     (fn [m dep]
       (let [lib (first dep)]
         (ensure-loaded lib env)
-        (refer-ns m
-          (-> (e/deref-env) :namespaces (get lib))
-          :all)))
+        (refer-ns m (lookup-ns lib) :all)))
     m
     inherits))
 
 (defn ^:private resolve-deps [dependencies env]
   (-> {}
+      (refer-core)
       (resolve-requires (:require dependencies) env)
       (resolve-inherits (:inherit dependencies) env)))
 
 (defn ^:private populate-env [name form env]
   (let [dependencies  (-> form deps->map)
         resolved-deps (resolve-deps dependencies env)]
-    (swap! e/*env* assoc :ns name)
-    (swap! e/*env* assoc-in [:namespaces name] 
+    ;; (swap! e/*env* assoc :ns name)
+    (swap! e/*env* assoc-in [:namespaces name]
            (merge {:ns name} resolved-deps))
     dependencies))
 
@@ -391,11 +397,12 @@
      :args     (mapv (a/analyze-in-env env) args)
      :children [:ptr :args]}))
 
-(defn analyze [form]
-  (binding [a/parse         parse
-            a/macroexpand-1 macroexpand-1
-            a/create-var    create-var
-            a/var?          var?]
-    (->> (e/deref-env)
-         (a/analyze form)
-         (analyze-captures))))
+(defn analyze
+  ([form]
+   (analyze form (e/deref-env)))
+  ([form env]
+   (binding [a/parse         parse
+             a/macroexpand-1 macroexpand-1
+             a/create-var    create-var
+             a/var?          var?]
+     (analyze-captures (a/analyze form env)))))
