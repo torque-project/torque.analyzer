@@ -366,6 +366,26 @@
              special-var))
     parsed))
 
+(defn analyze-catch [form env]
+  ;; TODO: assert that last element is a catch block
+  (let [expr (second form)]
+    {:op       :catch
+     :expr     (a/analyze expr env)
+     :children [:expr]}))
+
+(defmethod parse 'try* [form env]
+  (let [[_ expr catch] form]
+    {:op       :try-catch
+     :expr     (a/analyze expr env)
+     :catch    (analyze-catch catch env)
+     :children [:expr :catch]}))
+
+(defmethod parse 'throw* [form env]
+  (let [expr (second form)]
+    {:op        :throw
+     :throwable (a/analyze form env)
+     :children  [:throwable]}))
+
 (defmethod parse 'so* [form env]
   (let [lib (second form)]
     (if (string? lib)
