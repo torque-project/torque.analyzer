@@ -112,7 +112,6 @@
       {:ns ns})))
 
 (defn load-ns [sym]
-  ;; (println "LOADING: " sym)
   (if-let [lookup (r/resolve-ns *resolver* sym)]
     (with-resource [stream (:file lookup)]
       (binding [*resolver* (r/project-resolver (:project lookup))]
@@ -193,6 +192,16 @@
     m
     requires))
 
+(defn ^:private resolve-uses [m uses env]
+  (reduce
+    (fn [m dep]
+      (let [lib  (first dep)]
+        ;; load namespace recursively
+        (ensure-loaded lib env)
+        (refer-ns m (lookup-ns lib) :all)))
+    m
+    uses))
+
 (defn ^:private resolve-inherits [m inherits env]
   (reduce
     (fn [m dep]
@@ -206,6 +215,7 @@
   (-> {}
       (refer-core)
       (resolve-requires (:require dependencies) env)
+      (resolve-uses     (:use dependencies) env)
       (resolve-inherits (:inherit dependencies) env)))
 
 (defn ^:private populate-env [name form env]
@@ -214,7 +224,12 @@
     ;; (swap! e/*env* assoc :ns name)
     (swap! e/*env* assoc-in [:namespaces name]
            (merge {:ns name} resolved-deps))
+    (swap! e/*env* assoc-in [:namespaces name :mappings '*ns*]
+           (create-var '*ns* env))
     dependencies))
+
+(defn update-deps [ns f]
+  (swap! e/*env* update-in [:namespaces ns] f))
 
 (defmulti parse (fn [form env] (first form)))
 
@@ -309,7 +324,6 @@
                              :name (first meth))))
                        ;; FIXME: group by should probably be done later. just
                        ;; have a flat list of methods here
-                       (group-by :name)
                        (make-extension proto))]
         (recur (nthrest protos (inc (count meths)))
                (conj out ops)))
@@ -383,7 +397,7 @@
 (defmethod parse 'throw* [form env]
   (let [expr (second form)]
     {:op        :throw
-     :throwable (a/analyze form env)
+     :throwable (a/analyze expr env)
      :children  [:throwable]}))
 
 (defmethod parse 'so* [form env]
@@ -417,6 +431,16 @@
      :args     (mapv (a/analyze-in-env env) args)
      :children [:ptr :args]}))
 
+(defmethod parse 'apply* [form env]
+  (let [[_ f args] form
+        fenv     (u/ctx env :ctx/expr)]
+    {:op   :invoke
+     :form form
+     :env  env
+     :fn   (a/analyze-form f env)
+     :args (mapv (a/analyze-in-env fenv) args)
+     :children [:fn :args]}))
+
 (defn analyze
   ([form]
    (analyze form (e/deref-env)))
@@ -425,4 +449,6 @@
              a/macroexpand-1 macroexpand-1
              a/create-var    create-var
              a/var?          var?]
-     (analyze-captures (a/analyze form env)))))
+      (let [ast (a/analyze form env)]
+        (let [captured (analyze-captures ast)]
+          captured)))))

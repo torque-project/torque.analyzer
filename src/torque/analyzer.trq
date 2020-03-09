@@ -9,6 +9,7 @@
 
 (ns torque.analyzer
   (:require
+    [torque.lang.debug :as d]
     [torque.analyzer.utils :as u]
     [torque.analyzer.env   :as env]))
 
@@ -191,7 +192,7 @@
         statements     (mapv
                          (analyze-in-env statements-env)
                          (nth block 0))
-        ret            (analyze-form (nth block 1) env)]
+        ret            (analyze-form (nth block 1) (assoc env :context :ctx/return))]
     {:op         :do
      :env        env
      :form       form
@@ -540,7 +541,7 @@
   (let [sym  (second form)
         expr (nnext form)
         ns   (:ns env)]
-    (check-arity form env 0 3)
+    (check-arity form env 0 4)
     (check-symbol sym form env)
     (check-namespace sym form env)
     (let [init-fn   (init-form-analyzer form env)
